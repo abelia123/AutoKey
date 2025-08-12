@@ -30,8 +30,6 @@ echo "Building with PyInstaller..."
 pyinstaller --name="DirectionUI_8way_Mac" \
             --onefile \
             --windowed \
-            --icon=icon.icns \
-            --add-data="icon.icns:." \
             --hidden-import=PyQt6 \
             --hidden-import=pynput \
             --hidden-import=pyautogui \
@@ -39,7 +37,7 @@ pyinstaller --name="DirectionUI_8way_Mac" \
             direction_ui_8way_mac.py
 
 # ビルド結果の確認
-if [ -f "dist/DirectionUI_8way_Mac.app" ]; then
+if [ -d "dist/DirectionUI_8way_Mac.app" ]; then
     echo "✅ Build successful!"
     echo "Application created at: dist/DirectionUI_8way_Mac.app"
     

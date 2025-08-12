@@ -2,13 +2,22 @@ import sys
 import math
 import os
 os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '0'
+os.environ['QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM'] = '1'
 from PyQt6.QtWidgets import QApplication, QWidget
-from PyQt6.QtCore import Qt, QPoint, QPointF, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QPoint, QPointF, QTimer, pyqtSignal, QMetaObject, Q_ARG
 from PyQt6.QtGui import QPainter, QColor, QFont, QRadialGradient, QPen, QBrush
-from pynput import mouse
+from pynput import mouse, keyboard
 import pyautogui
+import time
+import subprocess
 
 class DirectionOverlay(QWidget):
+    # シグナルを追加
+    show_signal = pyqtSignal()
+    hide_signal = pyqtSignal()
+    update_direction_signal = pyqtSignal(str)
+    execute_action_signal = pyqtSignal()
+    
     def __init__(self):
         super().__init__()
         self.current_direction = ""
@@ -16,18 +25,32 @@ class DirectionOverlay(QWidget):
         self.threshold = 30
         self.animation_value = 0
         self.pulse_animation = 0
+        self.previous_active_window = None
         
         # UI設定（8方向対応で少し大きく）
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | 
-                          Qt.WindowType.WindowStaysOnTopHint | 
-                          Qt.WindowType.Tool)
+                          Qt.WindowType.WindowStaysOnTopHint |
+                          Qt.WindowType.NoDropShadowWindowHint |
+                          Qt.WindowType.WindowTransparentForInput)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setFixedSize(400, 400)
+        
+        # シグナルをスロットに接続
+        self.show_signal.connect(self.show_at_mouse)
+        self.hide_signal.connect(self.hide_overlay)
+        self.update_direction_signal.connect(self.update_direction)
+        self.execute_action_signal.connect(self.execute_action)
         
         # アニメーションタイマー
         self.animation_timer = QTimer()
         self.animation_timer.timeout.connect(self.update_animations)
         self.animation_timer.start(16)  # 60 FPS
+        
+        # キーボードコントローラーを作成
+        self.keyboard_controller = keyboard.Controller()
         
         # 8方向定義（Mac用キーボードショートカット）
         center_x, center_y = 200, 200
@@ -40,7 +63,7 @@ class DirectionOverlay(QWidget):
                 "symbol": "🎯", 
                 "pos": (center_x, center_y - radius), 
                 "color": QColor(100, 200, 255),  # シアン
-                "action": lambda: pyautogui.hotkey('cmd', 'a')  # Mac用
+                "action": lambda: self._execute_hotkey(keyboard.Key.cmd, 'a')  # Mac用
             },
             # 右上：コピー（右下のペーストと対）
             "up_right": {
@@ -48,7 +71,7 @@ class DirectionOverlay(QWidget):
                 "symbol": "📋", 
                 "pos": (center_x + int(radius * 0.707), center_y - int(radius * 0.707)), 
                 "color": QColor(255, 200, 100),  # オレンジ
-                "action": lambda: pyautogui.hotkey('cmd', 'c')  # Mac用
+                "action": lambda: self._execute_hotkey(keyboard.Key.cmd, 'c')  # Mac用
             },
             # 右：保存
             "right": {
@@ -56,7 +79,7 @@ class DirectionOverlay(QWidget):
                 "symbol": "💾", 
                 "pos": (center_x + radius, center_y), 
                 "color": QColor(60, 179, 113),  # MediumSeaGreen
-                "action": lambda: pyautogui.hotkey('cmd', 's')  # Mac用
+                "action": lambda: self._execute_hotkey(keyboard.Key.cmd, 's')  # Mac用
             },
             # 右下：ペースト（右上のコピーと対）
             "down_right": {
@@ -64,7 +87,7 @@ class DirectionOverlay(QWidget):
                 "symbol": "📏", 
                 "pos": (center_x + int(radius * 0.707), center_y + int(radius * 0.707)), 
                 "color": QColor(100, 255, 150),  # ミントグリーン
-                "action": lambda: pyautogui.hotkey('cmd', 'v')  # Mac用
+                "action": lambda: self._execute_hotkey(keyboard.Key.cmd, 'v')  # Mac用
             },
             # 下：Enter（確定）
             "down": {
@@ -72,7 +95,7 @@ class DirectionOverlay(QWidget):
                 "symbol": "⏎", 
                 "pos": (center_x, center_y + radius), 
                 "color": QColor(75, 0, 130),  # Indigo
-                "action": lambda: pyautogui.press('enter')
+                "action": lambda: self._execute_key(keyboard.Key.enter)
             },
             # 左下：スクリーンショット
             "down_left": {
@@ -80,7 +103,7 @@ class DirectionOverlay(QWidget):
                 "symbol": "📷", 
                 "pos": (center_x - int(radius * 0.707), center_y + int(radius * 0.707)), 
                 "color": QColor(220, 20, 60),  # Crimson
-                "action": lambda: pyautogui.hotkey('cmd', 'shift', '4')  # Mac用スクリーンショット
+                "action": lambda: (self.keyboard_controller.press(keyboard.Key.cmd), self.keyboard_controller.press(keyboard.Key.shift), self.keyboard_controller.press('5'), self.keyboard_controller.release('5'), self.keyboard_controller.release(keyboard.Key.shift), self.keyboard_controller.release(keyboard.Key.cmd))
             },
             # 左：Undo（戻る系操作）
             "left": {
@@ -88,7 +111,7 @@ class DirectionOverlay(QWidget):
                 "symbol": "↶", 
                 "pos": (center_x - radius, center_y), 
                 "color": QColor(255, 165, 0),  # Orange
-                "action": lambda: pyautogui.hotkey('cmd', 'z')  # Mac用
+                "action": lambda: self._execute_hotkey(keyboard.Key.cmd, 'z')  # Mac用
             },
             # 左上：Backspace（Macではdelete）
             "up_left": {
@@ -96,15 +119,44 @@ class DirectionOverlay(QWidget):
                 "symbol": "⌫", 
                 "pos": (center_x - int(radius * 0.707), center_y - int(radius * 0.707)), 
                 "color": QColor(178, 34, 34),  # FireBrick
-                "action": lambda: pyautogui.press('delete')  # Macではdeleteキー
+                "action": lambda: self._execute_key(keyboard.Key.delete)  # Macではdeleteキー
             }
         }
+        
+    def _execute_hotkey(self, modifier, key):
+        """pynputを使用してホットキーを実行"""
+        try:
+            print(f"Executing hotkey: {modifier} + {key}")
+            with self.keyboard_controller.pressed(modifier):
+                self.keyboard_controller.press(key)
+                self.keyboard_controller.release(key)
+        except Exception as e:
+            print(f"Error executing hotkey: {e}")
+            
+    def _execute_key(self, key):
+        """pynputを使用して単一キーを実行"""
+        try:
+            print(f"Executing key: {key}")
+            self.keyboard_controller.press(key)
+            self.keyboard_controller.release(key)
+        except Exception as e:
+            print(f"Error executing key: {e}")
+            
+    def _execute_and_hide(self, action):
+        """アクションを実行してからウィンドウを隠す"""
+        action()
+        # 少し待ってから完全に隠す
+        QTimer.singleShot(50, self.hide)
         
     def show_at_mouse(self):
         cursor_pos = QPoint(*pyautogui.position())
         self.move(cursor_pos.x() - 200, cursor_pos.y() - 200)
         self.animation_value = 0
+        self.setWindowOpacity(1)  # 不透明度をリセット
+        # フォーカスを奪わないように表示
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.show()
+        # raise_()は使わない - フォーカスを奪う可能性がある
         
     def hide_overlay(self):
         self.hide()
@@ -113,7 +165,12 @@ class DirectionOverlay(QWidget):
         
     def execute_action(self):
         if self.current_direction and self.current_direction in self.directions:
-            self.directions[self.current_direction]["action"]()
+            print(f"Executing action for direction: {self.current_direction}")
+            action = self.directions[self.current_direction]["action"]
+            # UIを非表示にする（フォーカスを奪わないように）
+            self.setWindowOpacity(0)  # 透明にする
+            # アクションを実行
+            QTimer.singleShot(10, lambda: self._execute_and_hide(action))
             
     def update_direction(self, direction):
         if direction != self.current_direction:
@@ -132,6 +189,9 @@ class DirectionOverlay(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 全体を透明で塗りつぶす（macOS対応）
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
         
         opacity = self.animation_value
         center = QPointF(200, 200)
@@ -216,7 +276,7 @@ class DirectionOverlay(QWidget):
                                            Qt.AlignmentFlag.AlignCenter, info["text"])
             
             # テキストを外側に配置（白背景対応）
-            font = QFont("SF Pro Display", 11, QFont.Weight.Bold)  # Mac用フォント
+            font = QFont("Helvetica Neue", 11, QFont.Weight.Bold)  # Mac用フォント
             painter.setFont(font)
             if is_selected:
                 painter.setPen(QColor(255, 255, 255, int(255 * opacity)))
@@ -240,16 +300,41 @@ class MouseHandler:
         self.mouse_listener.start()
         
     def on_click(self, x, y, button, pressed):
+        
         # Macでは異なるボタンマッピングの可能性があるため、複数のボタンに対応
-        if button in [mouse.Button.x2, mouse.Button.button8, mouse.Button.button9]:  # サイドボタン対応
+        is_side_button = False
+        
+        # Button.middleをサイドボタンとして認識
+        if button == mouse.Button.middle:
+            is_side_button = True
+        else:
+            try:
+                # その他のボタンもチェック
+                if hasattr(mouse.Button, 'button8') and button == mouse.Button.button8:
+                    is_side_button = True
+                elif hasattr(mouse.Button, 'button9') and button == mouse.Button.button9:
+                    is_side_button = True
+                elif hasattr(mouse.Button, 'x1') and button == mouse.Button.x1:
+                    is_side_button = True
+                elif hasattr(mouse.Button, 'x2') and button == mouse.Button.x2:
+                    is_side_button = True
+            except:
+                pass
+        
+        if is_side_button:
             if pressed:
                 self.tracking = True
                 self.start_x, self.start_y = x, y
-                self.overlay.show_at_mouse()
+                # メインスレッドでGUI操作を実行
+                self.overlay.show_signal.emit()
             else:
-                if self.tracking and self.overlay.current_direction:
-                    self.overlay.execute_action()
-                self.overlay.hide_overlay()
+                if self.tracking:
+                    if self.overlay.current_direction:
+                        # メインスレッドでexecute_actionを実行
+                        self.overlay.execute_action_signal.emit()
+                    else:
+                        # 方向が選択されていない場合のみhideを呼ぶ
+                        self.overlay.hide_signal.emit()
                 self.tracking = False
                     
     def on_move(self, x, y):
@@ -270,9 +355,11 @@ class MouseHandler:
                 directions = ["right", "down_right", "down", "down_left", 
                             "left", "up_left", "up", "up_right"]
                 
-                self.overlay.update_direction(directions[sector])
+                # メインスレッドでGUI操作を実行
+                self.overlay.update_direction_signal.emit(directions[sector])
             else:
-                self.overlay.update_direction("")
+                # メインスレッドでGUI操作を実行
+                self.overlay.update_direction_signal.emit("")
 
 def main():
     app = QApplication(sys.argv)
